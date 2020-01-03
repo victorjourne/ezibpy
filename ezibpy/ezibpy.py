@@ -1084,7 +1084,7 @@ class ezIBpy():
                 # parse time
                 s, ms = divmod(int(tick['time']), 1000)
                 tick['time'] = '{}.{:03d}'.format(
-                    time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(s)), ms)
+                    time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(s)), ms)
 
                 # add most recent bid/ask to "tick"
                 tick['bid']     = df2use[msg.tickerId]['bid'][0]
