@@ -32,7 +32,7 @@ from ib.opt import Connection
 from ib.ext.Contract import Contract
 from ib.ext.Order import Order
 from ib.ext.ComboLeg import ComboLeg
-
+from ib.ext.ExecutionFilter import ExecutionFilter
 # from ibapi.connection import Connection
 # from ibapi.contract import Contract, ComboLeg
 # from ibapi.order import Order
@@ -328,7 +328,8 @@ class ezIBpy():
 
         elif (msg.typeName == dataTypes["MSG_TYPE_OPEN_ORDER"] or
                 msg.typeName == dataTypes["MSG_TYPE_OPEN_ORDER_END"] or
-                msg.typeName == dataTypes["MSG_TYPE_ORDER_STATUS"]):
+                msg.typeName == dataTypes["MSG_TYPE_ORDER_STATUS"] or
+                msg.typeName == dataTypes["MSG_TYPE_EXEC_DETAILS"]):
             self.handleOrders(msg)
 
         elif msg.typeName == dataTypes["MSG_TYPE_HISTORICAL_DATA"]:
@@ -481,6 +482,9 @@ class ezIBpy():
         # add contract's multiple expiry/strike/sides to class collectors
         contractString = self.contractString(contract)
         tickerId = self.tickerId(contractString)
+
+        #print(100* "-")
+        #print('Why add the contract %s here??'%str(vars(contract)))
         self.contracts[tickerId] = contract
 
         # continue if this is a "multi" contract
@@ -698,9 +702,11 @@ class ezIBpy():
 
         # we need to handle mutiple events for the same order status
         duplicateMessage = False
+        if msg.typeName == dataTypes["MSG_TYPE_EXEC_DETAILS"]:
+            pass
 
         # open order
-        if msg.typeName == dataTypes["MSG_TYPE_OPEN_ORDER"]:
+        elif msg.typeName == dataTypes["MSG_TYPE_OPEN_ORDER"]:
             # contract identifier
             contractString = self.contractString(msg.contract)
 
@@ -876,7 +882,7 @@ class ezIBpy():
 
         if msg.date[:8].lower() == 'finished':
             # print(self.historicalData)
-
+            self.utc_history = True
             if self.utc_history:
                 for sym in self.historicalData:
                     contractString = str(sym)
@@ -908,7 +914,6 @@ class ezIBpy():
                 "L": msg.low, "C": msg.close, "V": msg.volume,
                 "OI": msg.count, "WAP": msg.WAP})
             hist_row.set_index('datetime', inplace=True)
-
             symbol = self.tickerSymbol(msg.reqId)
             if symbol not in self.historicalData.keys():
                 self.historicalData[symbol] = hist_row
@@ -1605,6 +1610,7 @@ class ezIBpy():
             newContract.m_comboLegs = kwargs["comboLegs"]
 
         # add contract to pool
+        print("Add contract inside ezib")
         self.contracts[tickerId] = newContract
 
         # request contract details
@@ -1796,6 +1802,8 @@ class ezIBpy():
             target=0., orderType=None, transmit=True, group=None, tif="DAY",
             rth=False, account=None):
         """ Creates TARGET order """
+        print('Create createTargetOrder. Args : ')
+        print(locals())
         params = {
             "quantity": quantity,
             "price": target,
@@ -1986,6 +1994,120 @@ class ezIBpy():
         }
 
     # -----------------------------------------
+
+    def createCustomOrder(self, contract, quantity,
+            entry=0., target=0., target2=0., stop=0.,
+            targetType=None, stopType=None,
+            trailingStop=False,  # (pct/amt/False)
+            trailingValue=None,  # value to train by (amt/pct)
+            trailingTrigger=None,  # (price where hard stop starts trailing)
+            group=None, tif="DAY",
+            fillorkill=False, iceberg=False, rth=False,
+            transmit=True, account=None, **kwargs):
+
+        """
+        creates One Cancels All Bracket Order
+        """
+        print('Arg of createCustomOrder are : ')
+        print(locals())
+        if group == None:
+            group = "bracket_" + str(int(time.time()))
+
+        account = self._get_active_account(account)
+
+        # main order
+        enteyOrder = self.createOrder(quantity, price=entry, transmit=False,
+                        tif=tif, fillorkill=fillorkill, iceberg=iceberg,
+                        rth=rth, account=account, **kwargs)
+
+        entryOrderId = self.placeOrder(contract, enteyOrder)
+
+        # target
+        targetOrderId = 0
+        if target > 0 or targetType == "MOC":
+            targetOrder = self.createTargetOrder(-1,
+                            parentId  = entryOrderId,
+                            target    = target,
+                            transmit  = False if stop > 0 else True,
+                            orderType = targetType,
+                            group     = group,
+                            rth       = rth,
+                            tif       = tif,
+                            account   = account
+                        )
+
+            self.requestOrderIds()
+            targetOrderId = self.placeOrder(contract, targetOrder, self.orderId + 1)
+            # print(self.orderId, targetOrderId)
+        # target2
+        target2OrderId = 0
+        if target2 > 0 or targetType == "MOC":
+            target2Order = self.createTargetOrder(1,
+                            parentId  = entryOrderId,
+                            target    = target2,
+                            transmit  = False if stop > 0 else True,
+                            orderType = targetType,
+                            group     = group,
+                            rth       = rth,
+                            tif       = tif,
+                            account   = account
+                        )
+
+            self.requestOrderIds()
+            target2OrderId = self.placeOrder(contract, target2Order, self.orderId + 2)
+            # print(self.orderId, targetOrderId)
+
+        # stop
+        stopOrderId = 0
+        if stop > 0:
+            stop_limit = stopType and stopType.upper() in ["LIMIT", "LMT"]
+            # stop_limit = stop_limit or (
+            #     trailingStop and trailingTrigger and trailingValue)
+            stopOrder = self.createStopOrder(-quantity,
+                            parentId   = entryOrderId,
+                            stop       = stop,
+                            trail      = None,
+                            transmit   = transmit,
+                            group      = group,
+                            rth        = rth,
+                            tif        = tif,
+                            stop_limit = stop_limit,
+                            account    = account
+                        )
+
+            self.requestOrderIds()
+            stopOrderId = self.placeOrder(contract, stopOrder, self.orderId + 3)
+            # print(self.orderId, stopOrderId)
+
+            # triggered trailing stop?
+            # print(trailingStop, trailingTrigger, trailingValue)
+            if trailingStop and trailingTrigger and trailingValue:
+                trailing_params = {
+                    "symbol": self.contractString(contract),
+                    "quantity": -quantity,
+                    "triggerPrice": trailingTrigger,
+                    "parentId": entryOrderId,
+                    "stopOrderId": stopOrderId,
+                    "targetOrderId": targetOrderId if targetOrderId != 0 else None,
+                    "account": account
+                }
+                if trailingStop.lower() in ['amt', 'amount']:
+                    trailing_params["trailAmount"] = trailingValue
+                elif trailingStop.lower() in ['pct', 'percent']:
+                    trailing_params["trailPercent"] = trailingValue
+
+                self.createTriggerableTrailingStop(**trailing_params)
+
+        return {
+            "group": group,
+            "entryOrderId": entryOrderId,
+            "targetOrderId": targetOrderId,
+            "target2OrderId": targetOrderId,
+            "stopOrderId": stopOrderId
+        }
+
+    # -----------------------------------------
+
     def placeOrder(self, contract, order, orderId=None, account=None):
         """ Place order on IB TWS """
 
@@ -2044,6 +2166,22 @@ class ezIBpy():
         if all_clients:
             self.ibConn.reqAllOpenOrders()
         self.ibConn.reqOpenOrders()
+
+    def requestExecutions(self, contract):
+        """
+        Requests current day's (since midnight) executions matching the filter.
+        Only the current day's executions can be retrieved.
+        Along with the executions, the CommissionReport will also be returned.
+        The execution details will arrive at EWrapper:execDetails.
+        """
+        filt = ExecutionFilter()
+        tickerId = self.tickerId(self.contractString(contract))
+        filt.m_clientId = self.clientId
+        filt.m_symbol = contract.m_symbol
+        filt.m_secType = contract.m_secType
+        filt.m_exchange = contract.m_exchange
+        print("reqExecutions")
+        self.ibConn.reqExecutions(tickerId, filt)
 
     # -----------------------------------------
     def requestOrderIds(self, numIds=1):
@@ -2153,6 +2291,8 @@ class ezIBpy():
             end_datetime = time.strftime(dataTypes["DATE_TIME_FORMAT_HISTORY"])
 
         if contracts == None:
+            print('self.contracts')
+            print(self.contracts)
             contracts = list(self.contracts.values())
 
         if not isinstance(contracts, list):
